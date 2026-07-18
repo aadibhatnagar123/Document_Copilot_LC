@@ -1,0 +1,145 @@
+agent:
+  name: doc_parser
+  full_name: Document Extraction & Normalization Agent
+  codename: DEXA
+  version: "0.1"
+  domain: Trade Finance — Documentary Credits (Letters of Credit) under UCP 600 / ISBP 745
+
+  role: >
+    First-stage extraction agent (Agent 1) in the LC document-examination pipeline.
+    DEXA receives a single raw trade-finance document (a Letter of Credit, invoice,
+    bill of lading, insurance certificate, packing list, etc.) plus the LC field
+    schema, and turns unstructured PDF text into a clean, typed set of schema-defined
+    fields ready for the downstream Internal_Checker.
+
+  goal: >
+    For one document, produce a normalized field dictionary keyed by schema field
+    name. Extract plain text through a 3-layer fallback chain, call Groq once to
+    pull the schema-defined fields as JSON, validate that required fields are present
+    and correctly typed, retry the extraction at most once with the validation errors
+    fed back into the prompt, and normalize every value to its correct Python type.
+    DEXA extracts only — it never compares documents, judges discrepancies, or
+    decides compliance. That is the job of later agents.
+
+  backstory: >
+    Trade-finance documents arrive as a mix of clean digital PDFs, scanned images,
+    and photocopies of varying quality, so a single extraction method is never
+    reliable. DEXA was built around a defensive 3-layer text chain — pdfplumber
+    first (fastest, best for digital PDFs), PyMuPDF second, and Tesseract OCR at
+    300 DPI as the last resort for scanned pages. It passes an `ocr_used` hint to
+    the LLM so the prompt can compensate for OCR noise. One retry (with the specific
+    null/type errors injected) recovers most malformed extractions without burning
+    tokens on repeated calls.
+
+  constraints:
+    - Processes exactly one document per invocation — no cross-document logic
+    - Extraction is schema-driven — only fields whose `appears_in` matches this doc_type are requested
+    - LLM runs at temperature 0 in json_object mode — deterministic, parseable JSON only
+    - At most 1 retry (retry_count max 1); unparseable JSON degrades to an empty dict, never a crash
+    - Never fabricates field values not supported by the document text
+    - Unparseable or missing values normalize to null rather than a guessed value
+    - If all 3 extraction layers fail, sets parse_failed=true and ends cleanly (graph short-circuits)
+
+  data_flow: >
+    Input `doc` is a raw_documents row (doc_id, doc_type, file_path, raw_text). If
+    raw_text is already present it is used directly; otherwise text is extracted from
+    file_path. Output `fields` is consumed by the Orchestrator, which aggregates all
+    documents into `parsed_docs` for the Internal_Checker.
+
+  # ── LLM config ────────────────────────────────────────────────────────────────
+  llm:
+    provider: Groq
+    model: llama-3.3-70b-versatile   # override via GROQ_MODEL env var
+    temperature: 0
+    response_format: json_object
+    calls_per_doc: 1                 # +1 only if a single retry fires
+    max_retries: 1
+    api_key_env: GROQ_API_KEY
+
+  # ── Text extraction chain ─────────────────────────────────────────────────────
+  text_extraction_layers:
+    - name: pdfplumber
+      order: 1
+      description: "Primary layer — fast, high-fidelity text for digital PDFs"
+    - name: pymupdf
+      order: 2
+      description: "Fallback (fitz) when pdfplumber returns nothing"
+    - name: ocr_tesseract
+      order: 3
+      description: "Last resort — rasterizes pages at 300 DPI and OCRs them; sets ocr_used=true"
+
+  # ── LangGraph ─────────────────────────────────────────────────────────────────
+  langgraph:
+    framework: LangGraph (StateGraph)
+    pattern: Linear extract–validate–retry pipeline with 2 conditional edges
+    state_schema: ParseState
+    build_function: build_doc_parser_subgraph   # Agents/Doc_Parser/graph.py
+
+    pipeline:
+      entry_point: load_text
+      nodes:
+        - load_text       # 3-layer extraction; parse_failed=true → END
+        - filter_fields   # keep only schema fields whose appears_in matches doc_type
+        - extract         # single Groq JSON call (retry injects validation_errors)
+        - validate        # required-field null/type check; fail + retry_count<1 → extract
+        - normalize       # type-coerce values; unparseable → null
+      conditional_edges:
+        after_load_text: "parse_failed ? END : filter_fields"
+        after_validate:  "valid or retry_count>=1 ? normalize : extract"
+
+  # ── Tools ─────────────────────────────────────────────────────────────────────
+  tools:
+    - name: get_raw_text
+      description: >
+        Orchestrates the 3-layer extraction chain (pdfplumber → PyMuPDF → OCR).
+        Returns (text, ocr_used); ocr_used is true only when the OCR layer produced
+        the text. Returns (None, false) if every layer fails.
+      helpers: [_try_pdfplumber, _try_pymupdf, _try_ocr]
+
+    - name: call_llm_extract
+      description: >
+        Single Groq call. Builds the prompt via build_extraction_prompt (with OCR
+        hint and, on retry, the prior validation_errors), requests json_object output
+        at temperature 0, and returns {field_name: raw_value}. Returns {} on JSON
+        decode failure so the graph can fall through gracefully.
+
+    - name: normalize_value
+      description: >
+        Type-safe per-field coercion. number → float (strips currency/symbols),
+        date → ISO YYYY-MM-DD (dateutil, dayfirst), string → trimmed. Empty or
+        unparseable input returns null.
+
+  # ── External prompt ───────────────────────────────────────────────────────────
+  prompts:
+    file: Prompts/extract_fields_prompts.py
+    builders:
+      - build_extraction_prompt   # field list + OCR hint + retry feedback
+
+  # ── State I/O ─────────────────────────────────────────────────────────────────
+  reads_from_state:
+    - doc          # raw_documents row: doc_id, doc_type, file_path, raw_text
+    - schema       # loaded schema.json
+  writes_to_state:
+    - fields       # dict[str, float | str | None] — normalized values
+    - parse_failed # bool — true if all extraction layers failed
+    - ocr_used     # bool — true if OCR produced the text
+
+  # ── Output schema ─────────────────────────────────────────────────────────────
+  output:
+    format: dict[str, float | str | None]   # keyed by schema field name
+    example:
+      lc_number: "LC-2024-00123"
+      issue_date: "2024-03-15"
+      amount: 125000.0
+      beneficiary: "Global Traders Ltd"
+
+  schema_path: configs/lc/schema.json
+
+  dependencies:
+    - langgraph
+    - groq
+    - pdfplumber
+    - pymupdf
+    - pytesseract
+    - pdf2image
+    - python-dateutil

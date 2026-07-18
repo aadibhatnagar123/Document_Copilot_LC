@@ -1,0 +1,166 @@
+agent:
+  name: Orchestrator
+  full_name: Pipeline Orchestration & HITL Coordination Agent
+  codename: POCA
+  version: "1.0"
+  domain: Trade Finance — Documentary Credits (Letters of Credit) under UCP 600 / ISBP 745
+
+  role: >
+    The top-level LangGraph graph that drives the entire LC document-examination
+    pipeline. POCA loads a run from SQLite, sequences the four agent subgraphs
+    (Doc_Parser → Internal_Checker → Semantic_Comparator → Report_Generator), pauses
+    at the human-in-the-loop checkpoint, resumes on the reviewer's decision, and
+    persists state after every stage. It coordinates only — all routing is deterministic
+    Python and it makes zero LLM calls of its own.
+
+  goal: >
+    Run a case from raw documents to final report reliably and resumably. Given only a
+    run_id, load the run and schema, invoke each agent subgraph in order, persist every
+    intermediate result to SQLite, and interrupt at the HITL node so a human can approve,
+    reject, or retry. On retry, loop back to the requested agent. Handle failures by
+    routing to terminal `rejected` / `error` states rather than crashing, and checkpoint
+    to SQLite so paused runs survive server restarts.
+
+  backstory: >
+    A documentary-credit examination can pause for hours or days at the human review
+    step, and the server cannot hold that state in memory. POCA uses LangGraph's
+    interrupt() together with a SqliteSaver checkpointer keyed by thread_id (the run_id),
+    so a paused run is durable — resume_pipeline picks up exactly where it stopped even
+    after a restart. Every agent writes through the shared RunState bus and POCA persists
+    each stage to the database, giving the frontend a status field to poll and producing
+    a complete audit trail. Failure handling is conservative: a blocked LC gate routes to
+    rejected, a crashed agent (after one retry) routes to error — the pipeline always
+    terminates in a defined state.
+
+  constraints:
+    - Zero LLM calls — all routing is deterministic Python (llm_calls = 0)
+    - run_id is the only input; everything else is loaded from the database
+    - State is checkpointed to SQLite after every stage — paused runs survive restarts
+    - HITL is a real graph interrupt() — the graph blocks until a decision is resumed
+    - Every path terminates in a defined status: done, rejected, error, or blocked
+    - Agent failures retry once, then route to the error terminal — never an unhandled crash
+
+  # ── LLM config ────────────────────────────────────────────────────────────────
+  llm:
+    provider: none
+    calls: 0
+    note: "Pure coordination — no model is invoked"
+
+  # ── LangGraph ─────────────────────────────────────────────────────────────────
+  langgraph:
+    framework: LangGraph (StateGraph) + SqliteSaver checkpointer
+    pattern: Sequential subgraph orchestration with an HITL interrupt and retry loop (4 conditional edges)
+    state_schema: RunState   # 17-field shared bus every agent reads and writes
+    build_function: build_orchestrator            # Agents/Orchestrator/graph.py
+    entry_points:
+      - run_pipeline(run_id)              # start a new run
+      - resume_pipeline(run_id, decision) # resume after HITL with approve/reject/retry
+    checkpointer:
+      type: SqliteSaver
+      thread_key: run_id
+      module: Agents/Orchestrator/checkpoint.py   # get_checkpointer()
+
+    pipeline:
+      entry_point: load_run
+      nodes:
+        - load_run   # read run + raw_documents, load schema; status → parsing
+        - parse      # invoke Doc_Parser per document, save each; all fail → error
+        - check      # invoke Internal_Checker (retry once on crash); blocked → rejected route
+        - semantic   # invoke Semantic_Comparator; on crash → default severity + recommendation
+        - hitl       # interrupt() — pause; resume with approve / reject / retry
+        - reports    # invoke Report_Generator (retry once); final status done or rejected
+        - rejected   # terminal — mark run rejected
+        - error      # terminal — mark run error
+      conditional_edges:
+        after_parse:   "status==error ? error : check"
+        after_check:   "status==error ? error : (blocked ? rejected : semantic)"
+        after_hitl:    "retry ? (agent1→parse | agent2→check | agent3→semantic) : reports"
+        after_reports: "status==error ? error : done"
+
+  # ── Managed agent subgraphs ───────────────────────────────────────────────────
+  agents:
+    - Doc_Parser           # Agent 1 — extraction (invoked per document at `parse`)
+    - Internal_Checker     # Agent 2 — deterministic validation gate (`check`)
+    - Semantic_Comparator  # Agent 3 — LLM resolution + recommendation (`semantic`)
+    - Report_Generator     # Agent 4 — MT799 + summary reports (`reports`, post-HITL)
+
+  # ── Run status flow ───────────────────────────────────────────────────────────
+  status_flow:
+    - parsing    # documents being extracted
+    - checker    # deterministic validation running
+    - semantic   # LLM resolution running
+    - hitl       # paused for human review
+    - report     # generating final reports
+    - done        # terminal — approved and reported
+    - rejected    # terminal — rejected by human or blocked LC gate
+    - blocked     # LC gate failed — run cannot proceed
+    - error       # terminal — unrecoverable failure
+
+  # ── Tools ─────────────────────────────────────────────────────────────────────
+  tools:
+    - name: read_run / read_raw_documents
+      group: DB Reads
+      description: "Load the run row and its raw document rows from SQLite."
+
+    - name: update_status
+      group: Status
+      description: "Writes the current status to lc_runs for frontend polling."
+
+    - name: save_parsed_doc / save_discrepancy / update_discrepancy_severity
+      group: Persistence
+      description: "Persist parsed documents and discrepancies (and their severities) to the DB."
+
+    - name: save_recommendation / save_hitl_decision
+      group: Decisions
+      description: "Save the Agent 3 recommendation and the human's HITL decision."
+
+    - name: log_error
+      group: Logging
+      description: "Writes errors to the audit_log table."
+
+    - name: empty_state
+      group: State
+      description: "Returns default values for all 17 RunState keys."
+
+  # ── State bus (RunState) ──────────────────────────────────────────────────────
+  state_bus:
+    reads_or_writes:
+      - run_id
+      - schema
+      - raw_docs
+      - parsed_docs
+      - lc_terms
+      - issues
+      - ambiguous_pairs
+      - blocked
+      - lc_ok
+      - recommendation
+      - recommendation_summary
+      - hitl_decision
+      - retry_from
+      - mt799_text
+      - summary_text
+      - mt799_pdf
+      - summary_pdf
+      - status
+
+  # ── Database ──────────────────────────────────────────────────────────────────
+  db_path: lc_runs.db
+  db_tables:
+    read:    [lc_runs, raw_documents]
+    written: [parsed_documents, discrepancies, hitl_decisions, audit_log, lc_runs]
+
+  # ── Output ────────────────────────────────────────────────────────────────────
+  output:
+    status:       "final run status: done | rejected | error | blocked"
+    mt799_text:   "SWIFT discrepancy notice (text)"
+    mt799_pdf:    "SWIFT discrepancy notice (PDF bytes)"
+    summary_text: "full run summary (text)"
+    summary_pdf:  "full run summary (PDF bytes)"
+    note: "All intermediate results are persisted to SQLite throughout execution."
+
+  schema_path: configs/lc/schema.json
+
+  dependencies:
+    - langgraph
+    - langgraph-checkpoint-sqlite

@@ -1,0 +1,142 @@
+agent:
+  name: Semantic_Comparator
+  full_name: Semantic Resolution, Severity & Recommendation Agent
+  codename: SRSA
+  version: "1.0"
+  domain: Trade Finance — Documentary Credits (Letters of Credit) under UCP 600 / ISBP 745
+
+  role: >
+    Third-stage reasoning agent (Agent 3) in the LC document-examination pipeline.
+    SRSA takes the ambiguous fuzzy-match pairs the Internal_Checker could not settle
+    deterministically, resolves them with LLM semantic judgment grounded in UCP/ISBP
+    rules, classifies the severity of every discrepancy in the run, and produces an
+    approve/reject recommendation with reasoning for the human reviewer.
+
+  goal: >
+    Convert uncertainty into a defensible decision. Query ChromaDB for the relevant
+    UCP 600 / ISBP 745 rules per ambiguous pair, then make three sequential Groq calls:
+    (1) resolve each pair as match/mismatch, (2) classify every issue as critical /
+    major / minor, and (3) generate an approve-or-reject recommendation with a 3–5
+    sentence rationale. Every call has a deterministic fallback so the pipeline never
+    crashes on an LLM failure. SRSA advises — the human HITL step makes the final call.
+
+  backstory: >
+    Some documentary-credit discrepancies hinge on meaning, not string equality — is
+    "Global Traders Ltd." the same party as "Global Traders Limited"? Is a goods
+    description "consistent" with the LC under ISBP? These require judgment, so they
+    are escalated here. But an LLM that hangs or returns garbage cannot be allowed to
+    stall a banking workflow, so SRSA pairs every LLM call with a deterministic fallback:
+    rapidfuzz at a stricter 75 threshold for pair resolution, a fixed kind→severity map
+    for classification, and a severity-count rule (any critical → reject, only minor →
+    approve) for the recommendation. The load-bearing guarantee is that the graph always
+    reaches a decision.
+
+  constraints:
+    - At most 3 LLM calls (llm_calls_max = 3), each temperature 0, json_object mode
+    - Every LLM call has a deterministic fallback — the graph never crashes on LLM failure
+    - A non-"approve" recommendation always defaults to "reject" (fail-safe)
+    - Only resolves pairs the Internal_Checker flagged ambiguous — never re-runs deterministic checks
+    - Never issues the final decision — output is a recommendation for the HITL step
+    - New semantic issues are stamped with UCP/ISBP citations before merging
+
+  # ── LLM config ────────────────────────────────────────────────────────────────
+  llm:
+    provider: Groq
+    model: llama-3.3-70b-versatile   # override via GROQ_MODEL env var
+    temperature: 0
+    response_format: json_object
+    calls_max: 3
+    api_key_env: GROQ_API_KEY
+
+  # ── LangGraph ─────────────────────────────────────────────────────────────────
+  langgraph:
+    framework: LangGraph (StateGraph)
+    pattern: RAG-grounded 3-call chain, each guarded by a deterministic fallback (3 conditional edges)
+    state_schema: SemanticState
+    build_function: build_semantic_comparator_subgraph   # Agents/Semantic_Comparator/graph.py
+
+    pipeline:
+      entry_point: rag_lookup
+      nodes:
+        - rag_lookup                    # ChromaDB: pull UCP/ISBP rules per ambiguous pair
+        - resolve_pairs                 # LLM Call 1 — match/mismatch per pair
+        - deterministic_fallback        # Fallback 1 — rapidfuzz @75 → fuzzy_mismatch / needs_manual_review
+        - merge_issues                  # combine Internal_Checker issues + new semantic issues; stamp citations
+        - classify_severity             # LLM Call 2 — critical / major / minor per issue
+        - default_severity              # Fallback 2 — deterministic kind→severity map
+        - generate_recommendation       # LLM Call 3 — approve/reject + 3–5 sentence reasoning
+        - apply_default_recommendation  # Fallback 3 — severity-count decision
+        - apply_final                   # clear ambiguous_pairs (all resolved) — pipeline complete
+      conditional_edges:
+        after_resolve_pairs:  "LLM ok ? merge_issues : deterministic_fallback"
+        after_classify:       "LLM ok ? generate_recommendation : default_severity"
+        after_recommendation: "LLM ok ? apply_final : apply_default_recommendation"
+
+  # ── Tools ─────────────────────────────────────────────────────────────────────
+  tools:
+    - name: call_semantic_compare
+      group: LLM Call 1
+      description: >
+        Groq JSON call judging each ambiguous pair as match/mismatch with UCP/ISBP
+        context. resolve_verdicts converts mismatch verdicts into semantic_mismatch issues.
+
+    - name: fallback_resolve
+      group: Fallback 1
+      description: "rapidfuzz at a stricter 75 threshold → fuzzy_mismatch or needs_manual_review."
+
+    - name: call_severity_classify
+      group: LLM Call 2
+      description: "Groq JSON call classifying each issue; apply_severity stamps the label onto issues."
+
+    - name: apply_default_severity
+      group: Fallback 2
+      description: >
+        Deterministic kind→severity map: missing_doc / lc_expired → critical,
+        missing_field → minor, everything else → major.
+
+    - name: call_recommendation
+      group: LLM Call 3
+      description: "Groq JSON call producing approve/reject plus a summary rationale."
+
+    - name: default_recommendation
+      group: Fallback 3
+      description: "Severity counts: any critical → reject, any major → reject, only minor → approve."
+
+    - name: attach_citations
+      group: Citations
+      description: "Stamps UCP 600 / ISBP 745 article refs on new semantic issues via ChromaDB RAG."
+
+  # ── External prompts ──────────────────────────────────────────────────────────
+  prompts:
+    file: Prompts/semantic_comparator_prompts.py
+    builders:
+      - build_semantic_prompt         # Call 1
+      - build_severity_prompt         # Call 2
+      - build_recommendation_prompt   # Call 3
+
+  # ── State I/O ─────────────────────────────────────────────────────────────────
+  reads_from_state:
+    - ambiguous_pairs   # fuzzy matches (40–92 band) from Internal_Checker
+    - issues            # all issues accumulated so far
+    - schema
+  writes_to_state:
+    - issues                    # severity + citations stamped on all issues
+    - ambiguous_pairs           # cleared to [] once every pair is resolved
+    - resolved_issues           # new semantic mismatch issues produced here
+    - recommendation            # "approve" | "reject"
+    - recommendation_summary    # 3–5 sentence rationale (LLM or fallback)
+
+  # ── Output ────────────────────────────────────────────────────────────────────
+  output:
+    issues:                 "list[dict] — every issue carries severity (critical/major/minor) + citation"
+    recommendation:         "str — approve | reject (non-approve fails safe to reject)"
+    recommendation_summary: "str — 3–5 sentence explanation"
+    ambiguous_pairs:        "[] — all pairs resolved"
+
+  schema_path: configs/lc/schema.json
+
+  dependencies:
+    - langgraph
+    - groq
+    - rapidfuzz
+    - chromadb   # UCP/ISBP rule retrieval

@@ -1,0 +1,17 @@
+langgraph==1.2.6
+pdfplumber==0.11.10
+groq==1.5.0
+python-dotenv==1.1.1
+python-dateutil==2.9.0
+chromadb
+sentence-transformers
+langchain-huggingface==1.2.2
+langchain-chroma==1.1.0
+pymupdf==1.24.10
+pytesseract==0.3.13
+pdf2image==1.17.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+python-multipart>=0.0.12
+rapidfuzz==3.14.5
+fpdf2>=2.7.8

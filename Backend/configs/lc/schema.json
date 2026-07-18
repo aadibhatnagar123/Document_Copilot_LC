@@ -1,0 +1,91 @@
+{
+  "fields": [
+    { "field": "lc_number", "type": "string", "required": true, "appears_in": ["lc_terms"] },
+    { "field": "issue_date", "type": "date", "required": true, "appears_in": ["lc_terms"] },
+    { "field": "expiry_date", "type": "date", "required": true, "appears_in": ["lc_terms"] },
+    { "field": "latest_shipment_date", "type": "date", "required": false, "appears_in": ["lc_terms"] },
+    { "field": "applicant", "type": "string", "required": true, "appears_in": ["lc_terms"] },
+    { "field": "beneficiary", "type": "string", "required": true, "appears_in": ["lc_terms"] },
+    { "field": "issuing_bank", "type": "string", "required": false, "appears_in": ["lc_terms"] },
+    { "field": "currency", "type": "string", "required": true, "appears_in": ["lc_terms", "invoice", "insurance_certificate", "bill_of_exchange"], "compare": "exact" },
+    { "field": "amount", "type": "number", "required": true, "appears_in": ["lc_terms", "invoice"], "compare": "numeric_tolerance", "tolerance": 0.01 },
+    { "field": "partial_shipments_allowed", "type": "string", "required": false, "appears_in": ["lc_terms"] },
+
+    { "field": "invoice_number", "type": "string", "required": true, "appears_in": ["invoice", "packing_list", "certificate_of_origin"], "compare": "exact" },
+    { "field": "invoice_date", "type": "date", "required": true, "appears_in": ["invoice"] },
+    { "field": "seller", "type": "string", "required": true, "appears_in": ["invoice"] },
+    { "field": "buyer", "type": "string", "required": true, "appears_in": ["invoice"] },
+    { "field": "terms_of_delivery", "type": "string", "required": false, "appears_in": ["invoice"] },
+
+    { "field": "description_of_goods", "type": "string", "required": true, "appears_in": ["invoice", "bill_of_lading", "packing_list", "certificate_of_origin", "insurance_certificate", "inspection_certificate"], "compare": "fuzzy" },
+    { "field": "quantity", "type": "number", "required": false, "appears_in": ["invoice", "packing_list", "inspection_certificate"], "compare": "numeric_tolerance", "tolerance": 0 },
+    { "field": "unit_price", "type": "number", "required": false, "appears_in": ["invoice"] },
+
+    { "field": "bl_number", "type": "string", "required": true, "appears_in": ["bill_of_lading"] },
+    { "field": "shipper", "type": "string", "required": true, "appears_in": ["bill_of_lading"] },
+    { "field": "consignee", "type": "string", "required": true, "appears_in": ["bill_of_lading", "certificate_of_origin"], "compare": "fuzzy" },
+    { "field": "notify_party", "type": "string", "required": false, "appears_in": ["bill_of_lading"] },
+    { "field": "vessel_name", "type": "string", "required": false, "appears_in": ["bill_of_lading"] },
+    { "field": "port_of_loading", "type": "string", "required": true, "appears_in": ["lc_terms", "bill_of_lading"], "compare": "fuzzy", "fuzzy_high": 90 },
+    { "field": "port_of_discharge", "type": "string", "required": true, "appears_in": ["lc_terms", "bill_of_lading"], "compare": "fuzzy", "fuzzy_high": 90 },
+    { "field": "shipment_date", "type": "date", "required": true, "appears_in": ["bill_of_lading"] },
+    { "field": "gross_weight", "type": "number", "required": false, "appears_in": ["bill_of_lading", "packing_list"], "compare": "numeric_tolerance", "tolerance": 0.5 },
+    { "field": "container_numbers", "type": "string", "required": false, "appears_in": ["bill_of_lading"] },
+
+    { "field": "packing_list_number", "type": "string", "required": true, "appears_in": ["packing_list"] },
+    { "field": "net_weight", "type": "number", "required": false, "appears_in": ["packing_list"] },
+    { "field": "number_of_packages", "type": "number", "required": false, "appears_in": ["packing_list"] },
+
+    { "field": "coo_certificate_number", "type": "string", "required": true, "appears_in": ["certificate_of_origin"] },
+    { "field": "exporter", "type": "string", "required": true, "appears_in": ["certificate_of_origin"] },
+    { "field": "country_of_origin", "type": "string", "required": true, "appears_in": ["certificate_of_origin"] },
+
+    { "field": "insurance_certificate_number", "type": "string", "required": true, "appears_in": ["insurance_certificate"] },
+    { "field": "insured_amount", "type": "number", "required": true, "appears_in": ["insurance_certificate"] },
+    { "field": "insured_party", "type": "string", "required": false, "appears_in": ["insurance_certificate"] },
+    { "field": "policy_date", "type": "date", "required": false, "appears_in": ["insurance_certificate"] },
+    { "field": "coverage_type", "type": "string", "required": false, "appears_in": ["insurance_certificate"] },
+
+    { "field": "bill_number", "type": "string", "required": true, "appears_in": ["bill_of_exchange"] },
+    { "field": "drawer", "type": "string", "required": true, "appears_in": ["bill_of_exchange"] },
+    { "field": "drawee", "type": "string", "required": true, "appears_in": ["bill_of_exchange"] },
+    { "field": "tenor", "type": "string", "required": false, "appears_in": ["bill_of_exchange"] },
+    { "field": "date_of_issue", "type": "date", "required": false, "appears_in": ["bill_of_exchange"] },
+    { "field": "maturity_date", "type": "date", "required": false, "appears_in": ["bill_of_exchange"] },
+
+    { "field": "inspection_certificate_number", "type": "string", "required": true, "appears_in": ["inspection_certificate"] },
+    { "field": "inspection_date", "type": "date", "required": false, "appears_in": ["inspection_certificate"] },
+    { "field": "inspector", "type": "string", "required": false, "appears_in": ["inspection_certificate"] },
+    { "field": "result", "type": "string", "required": false, "appears_in": ["inspection_certificate"] }
+  ],
+  "gate_requirements": [
+    "lc_number",
+    "expiry_date",
+    "beneficiary",
+    "amount"
+  ],
+  "date_rules": [
+    {
+      "before": "latest_shipment_date",
+      "before_doc": "lc_terms",
+      "after": "expiry_date",
+      "after_doc": "lc_terms",
+      "article": "UCP 600 Article 43"
+    },
+    {
+      "before": "shipment_date",
+      "before_doc": "bill_of_lading",
+      "after": "latest_shipment_date",
+      "after_doc": "lc_terms",
+      "article": "UCP 600 Article 43"
+    },
+    {
+      "doc_type": "invoice",
+      "field": "invoice_date",
+      "of_doc": "bill_of_lading",
+      "of": "shipment_date",
+      "within_days": 21,
+      "article": "UCP 600 Article 14c"
+    }
+  ]
+}

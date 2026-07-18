@@ -1,0 +1,130 @@
+agent:
+  name: Report_Generator
+  full_name: MT799 Notice & Run-Summary Report Agent
+  codename: MNSA
+  version: "1.0"
+  domain: Trade Finance — Documentary Credits (Letters of Credit) under UCP 600 / ISBP 745
+
+  role: >
+    Final-stage output agent (Agent 4) in the LC document-examination pipeline.
+    MNSA runs only after the human HITL decision. It takes every discrepancy (with
+    severity and citations), the LC terms, the parsed documents, the AI recommendation,
+    and the human's decision, and produces the two deliverables a trade-finance desk
+    needs: an MT799 SWIFT discrepancy notice and a full run summary — each as both
+    text and a downloadable PDF.
+
+  goal: >
+    Turn the completed examination into bank-ready documents. Sort issues by severity,
+    render an MT799 SWIFT-formatted discrepancy notice from a template, optionally polish
+    it into formal banking prose via a single Groq call, build a full summary report
+    (LC terms, issue counts, every discrepancy, AI recommendation, and HITL decision),
+    convert both texts to PDF via FPDF, and persist all four artifacts to SQLite. MNSA
+    runs for both approved and rejected outcomes.
+
+  backstory: >
+    When examination is done, the desk needs a document it can send on the wire, not a
+    JSON blob. The MT799 free-format SWIFT message is the standard vehicle for a
+    discrepancy notice, so MNSA renders one from a deterministic template first — that
+    template output is always valid even if the LLM is unavailable. The single optional
+    Groq polish call (temperature 0.3) only rewrites tone into formal banking language;
+    if it fails, the template text is kept verbatim. PDFs use Helvetica headers over a
+    Courier body and sanitize Unicode to ASCII so they render identically everywhere.
+
+  constraints:
+    - Runs only after HITL — gated on hitl_decision being present
+    - At most 1 optional LLM call (llm_calls_max = 1), for prose polish only
+    - Template MT799 is always produced first — LLM polish failure keeps the template text
+    - Runs for both "approved" and "rejected" decisions (never skipped on rejection)
+    - Never re-derives issues or severities — consumes what Agents 2 and 3 produced
+    - PDF generation sanitizes Unicode → ASCII to guarantee consistent rendering
+
+  # ── LLM config ────────────────────────────────────────────────────────────────
+  llm:
+    provider: Groq
+    model: llama-3.3-70b-versatile   # override via GROQ_MODEL env var
+    temperature: 0.3                 # prose polish only
+    calls_max: 1
+    optional: true                   # failure falls back to template text
+    api_key_env: GROQ_API_KEY
+
+  # ── LangGraph ─────────────────────────────────────────────────────────────────
+  langgraph:
+    framework: LangGraph (StateGraph)
+    pattern: Linear 5-node pipeline (no conditional edges)
+    state_schema: ReportState
+    build_function: build_report_generator_subgraph   # Agents/Report_Generator/graph.py
+
+    pipeline:
+      entry_point: gather_data
+      nodes:
+        - gather_data       # sort all issues by severity (critical → major → minor)
+        - generate_mt799    # build MT799 SWIFT notice from template: LC header + discrepancies + citations
+        - polish_mt799      # optional Groq call (temp 0.3) → banking prose; on failure keep template
+        - generate_summary  # build full run summary text; convert both texts to PDF via FPDF
+        - save_reports      # persist mt799_text/summary_text/mt799_pdf/summary_pdf to lc_runs (SQLite)
+
+  # ── Tools ─────────────────────────────────────────────────────────────────────
+  tools:
+    - name: sort_issues_by_severity
+      group: Data Prep
+      description: "Sorts issues critical → major → minor; group_issues_by_severity / _by_doc build report sections."
+
+    - name: build_mt799_text
+      group: MT799
+      description: "Renders a SWIFT MT799-formatted notice with the LC reference and discrepancies by severity."
+
+    - name: build_summary_text
+      group: Summary
+      description: >
+        Builds the full run report: LC terms, issue counts, every discrepancy,
+        the AI recommendation, the HITL decision, and a conclusion line.
+
+    - name: call_polish
+      group: LLM Polish
+      description: "Single Groq call rewriting the MT799 template into formal banking prose (optional)."
+
+    - name: text_to_pdf
+      group: PDF
+      description: >
+        FPDF-based PDF generation — Helvetica headers, Courier body. _pdf_safe
+        sanitizes Unicode → ASCII so output renders consistently.
+
+    - name: save_reports_to_db
+      group: DB
+      description: "Writes all four outputs (2 text + 2 PDF byte blobs) to the run's lc_runs row."
+
+  # ── External prompt ───────────────────────────────────────────────────────────
+  prompts:
+    file: Prompts/report_generator_prompts.py
+    builders:
+      - build_polish_prompt   # rewrite MT799 into formal banking language
+
+  # ── State I/O ─────────────────────────────────────────────────────────────────
+  reads_from_state:
+    - run_id
+    - issues                  # all discrepancies with severity, citation, kind, message
+    - parsed_docs             # Agent 1 output
+    - lc_terms                # LC term-sheet fields
+    - schema
+    - recommendation          # Agent 3 approve/reject
+    - recommendation_summary  # Agent 3 reasoning
+    - hitl_decision           # "approved" | "rejected" — the human's final call
+  writes_to_state:
+    - mt799_text     # str — MT799 SWIFT discrepancy notice (polished or template)
+    - summary_text   # str — full run summary
+    - mt799_pdf      # bytes — MT799 as formatted PDF
+    - summary_pdf    # bytes — summary report as formatted PDF
+
+  # ── Output ────────────────────────────────────────────────────────────────────
+  output:
+    mt799_text:   "str — SWIFT MT799 discrepancy notice"
+    summary_text: "str — full run summary (terms, issues, decisions, conclusion)"
+    mt799_pdf:    "bytes — MT799 PDF"
+    summary_pdf:  "bytes — summary PDF"
+
+  schema_path: configs/lc/schema.json
+
+  dependencies:
+    - langgraph
+    - fpdf2
+    - groq

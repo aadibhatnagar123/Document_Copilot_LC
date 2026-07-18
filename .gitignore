@@ -1,0 +1,113 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# ==========================
+# Environment Variables
+# ==========================
+.env
+.env.*
+!.env.example
+
+# ==========================
+# Databases
+# ==========================
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# ==========================
+# ChromaDB / Vector Stores
+# ==========================
+chroma/
+chromadb/
+chroma_db/
+chroma_store/
+vectorstore/
+vector_store/
+vectorstores/
+vector_db/
+vectordb/
+persist/
+storage/
+index/
+indexes/
+faiss_index/
+faiss/
+lancedb/
+milvus_data/
+qdrant_storage/
+weaviate_data/
+
+# ==========================
+# Uploads / Test Data
+# ==========================
+uploads/
+Backend/test_data/
+
+# ==========================
+# Logs
+# ==========================
+logs/
+*.log
+
+# ==========================
+# Cache Files
+# ==========================
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ==========================
+# Jupyter
+# ==========================
+.ipynb_checkpoints/
+
+# ==========================
+# Package Managers
+# ==========================
+uv.lock
+
+# ==========================
+# IDEs
+# ==========================
+.vscode/
+.idea/
+
+# ==========================
+# Operating System Files
+# ==========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================
+# Miscellaneous
+# ==========================
+*.tmp
+*.temp
+*.bak
+*.swp

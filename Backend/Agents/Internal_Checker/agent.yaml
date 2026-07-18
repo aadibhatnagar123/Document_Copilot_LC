@@ -1,0 +1,142 @@
+agent:
+  name: Internal_Checker
+  full_name: Deterministic Validation & Compliance Gate Agent
+  codename: DVGA
+  version: "1.0"
+  domain: Trade Finance — Documentary Credits (Letters of Credit) under UCP 600 / ISBP 745
+
+  role: >
+    Second-stage validation agent (Agent 2) in the LC document-examination pipeline.
+    DVGA is a fully deterministic gate — zero LLM calls. It receives every parsed
+    document plus the schema, checks each document for completeness and date validity,
+    cross-checks documents against one another and against the Letter of Credit terms,
+    and produces a structured list of discrepancies with UCP/ISBP citations.
+
+  goal: >
+    Catch every deterministically detectable discrepancy before any LLM reasoning is
+    spent. First run the LC gate check (required LC terms present + not expired). If
+    the LC passes, run two verification passes: Pass A validates each document in
+    isolation (required docs present, required fields non-null, date rules satisfied);
+    Pass B cross-compares documents against each other and against the LC terms.
+    Field comparisons that fuzzy-match in the 40–92 band are ambiguous — DVGA does
+    not decide them, it queues them as `ambiguous_pairs` for the Semantic_Comparator.
+
+  backstory: >
+    In documentary-credit examination, most discrepancies are objective — a missing
+    document, a blank field, an expired credit, a date out of sequence, an amount that
+    doesn't reconcile. Spending LLM tokens on these is wasteful and non-auditable, so
+    DVGA resolves everything a rule can settle and hands only genuinely ambiguous
+    string matches to the LLM stage. Exact matches pass silently, clear mismatches
+    become issues immediately, and only the uncertain middle band (rapidfuzz 40–92)
+    is escalated. Every issue it emits carries a UCP 600 / ISBP 745 article citation
+    retrieved from a ChromaDB rule index, so the eventual notice is defensible.
+
+  constraints:
+    - Zero LLM calls — every decision is deterministic Python (llm_calls = 0)
+    - The LC gate is a hard stop — if LC terms are incomplete or expired, sets blocked=true and ends
+    - Never resolves ambiguous fuzzy matches itself — the 40–92 band is forwarded, not judged
+    - Comparison method is schema-driven per field (exact / numeric / date / fuzzy)
+    - Every emitted issue carries doc_type, field, kind, message, and a citation
+    - Purely additive to `issues` — never removes issues raised earlier in the run
+
+  scoring_bands:
+    exact_or_high_match: ">92 — treated as a match, no issue raised"
+    ambiguous: "40–92 — queued to ambiguous_pairs for Semantic_Comparator"
+    clear_mismatch: "<40 — raised as a discrepancy immediately"
+
+  # ── LLM config ────────────────────────────────────────────────────────────────
+  llm:
+    provider: none
+    calls: 0
+    note: "Deterministic by design — no model is invoked at any node"
+
+  # ── LangGraph ─────────────────────────────────────────────────────────────────
+  langgraph:
+    framework: LangGraph (StateGraph)
+    pattern: Gate → two-pass verification, 1 conditional edge
+    state_schema: CheckState
+    build_function: build_internal_checker_subgraph   # Agents/Internal_Checker/graph.py
+
+    pipeline:
+      entry_point: gate
+      nodes:
+        - gate     # validate_lc_terms; invalid → blocked=true → END
+        - pass_a   # per-document: required docs, completeness, date rules; stamps citations
+        - pass_b   # cross-doc consistency + doc-vs-LC compliance; updates DB status to hitl
+      conditional_edges:
+        after_gate: "lc_ok ? pass_a : END (blocked)"
+
+  # ── Tools ─────────────────────────────────────────────────────────────────────
+  tools:
+    - name: validate_lc_terms
+      group: Gate
+      description: >
+        Checks the LC terms sheet against schema `gate_requirements` and verifies the
+        credit's expiry_date is not in the past. Failure sets blocked=true and lc_ok=false.
+
+    - name: check_required_documents
+      group: Pass A — Presence
+      description: "Verifies every LC-required document is present and readable."
+
+    - name: check_completeness
+      group: Pass A — Completeness
+      description: "Ensures required schema fields are non-null for each document."
+
+    - name: check_dates
+      group: Pass A — Dates
+      description: >
+        Evaluates schema `date_rules`. Delegates to _check_not_in_past,
+        _check_before_after, and _check_within_days for each rule type.
+
+    - name: run_consistency_checks
+      group: Pass B — Cross-doc
+      description: >
+        Compares supporting documents against each other field-by-field via
+        _compare_field, which dispatches to the correct comparator by schema `compare` type.
+
+    - name: run_compliance_checks
+      group: Pass B — Compliance
+      description: "Compares each document against the LC terms for UCP/ISBP compliance."
+
+    - name: comparators
+      group: Pass B — Comparators
+      description: >
+        compare_exact, compare_numeric, compare_date, and fuzzy_score — the individual
+        field-comparison primitives. fuzzy_score (rapidfuzz) drives the 40–92 ambiguity band.
+
+    - name: attach_citations
+      group: Citations
+      description: >
+        Stamps UCP 600 / ISBP 745 article references onto each issue via ChromaDB RAG retrieval.
+
+    - name: helpers
+      group: Helpers
+      description: "make_issue (issue construction), _parse_date, _get_field_value."
+
+  # ── State I/O ─────────────────────────────────────────────────────────────────
+  reads_from_state:
+    - run_id
+    - parsed_docs   # dict[str, dict] of doc_type → fields from Doc_Parser
+    - schema
+    - issues        # starts [], accumulated through the pipeline
+  writes_to_state:
+    - issues            # list[dict]: doc_type, field, kind, message, citation
+    - ambiguous_pairs   # fuzzy matches in the 40–92 band → Semantic_Comparator
+    - lc_ok             # false if LC terms incomplete or expired
+    - lc_terms          # extracted LC term-sheet fields
+    - blocked           # true if the gate check failed (run cannot proceed)
+
+  # ── Output ────────────────────────────────────────────────────────────────────
+  output:
+    issues:          "list[dict] — each with doc_type, field, kind, message, citation"
+    ambiguous_pairs: "list[dict] — fuzzy matches (40–92) forwarded to Agent 3"
+    lc_ok:           "bool — LC gate result"
+    blocked:         "bool — true halts the run before any downstream agent"
+    lc_terms:        "dict — extracted LC term-sheet fields"
+
+  schema_path: configs/lc/schema.json
+
+  dependencies:
+    - langgraph
+    - rapidfuzz
+    - chromadb   # UCP/ISBP citation retrieval
